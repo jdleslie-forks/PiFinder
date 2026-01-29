@@ -116,8 +116,12 @@
         <div class="metric-value" id="gpuMemory">--</div>
       </div>
       <div class="stat-box">
-        <div class="metric-label">Swap Used (ZRAM)</div>
+        <div class="metric-label">Effective Free</div>
         <div class="metric-value" id="swapUsed">--</div>
+      </div>
+      <div class="stat-box">
+        <div class="metric-label">ZRAM Ratio</div>
+        <div class="metric-value" id="zramRatio">--</div>
       </div>
       <div class="stat-box">
         <div class="metric-label">Uptime</div>
@@ -288,7 +292,7 @@ function initCharts() {
           stack: 'memory'
         },
         {
-          label: 'Available Memory',
+          label: 'Available',
           data: [],
           borderColor: 'rgba(76, 175, 80, 1)',
           backgroundColor: 'rgba(76, 175, 80, 0.7)',
@@ -334,7 +338,8 @@ function initCharts() {
                 return [
                   'Total System Memory: ' + entry.total + ' MB',
                   'Used: ' + (entry.pifinder + entry.gpu + entry.other) + ' MB',
-                  'Free: ' + entry.available + ' MB'
+                  'Free: ' + entry.available + ' MB',
+                  'Effective (w/zram): ' + (entry.effectiveFree || entry.available) + ' MB'
                 ];
               }
               return '';
@@ -355,7 +360,7 @@ async function updateDebugData() {
 
     // Update system metrics
     document.getElementById('totalMemory').textContent =
-      (metrics.memory?.system_total_mb || '--') + ' MB';
+      (metrics.memory?.physical_mb || '--') + ' MB';
     document.getElementById('availableMemory').textContent =
       (metrics.memory?.available_mb || '--') + ' MB';
     document.getElementById('pifinderMemory').textContent =
@@ -365,7 +370,9 @@ async function updateDebugData() {
         ? metrics.memory.gpu_mem_mb + ' MB'
         : 'Unknown');
     document.getElementById('swapUsed').textContent =
-      (metrics.memory?.swap_used_mb || '--') + ' MB';
+      (metrics.memory?.effective_free_mb || '--') + ' MB';
+    document.getElementById('zramRatio').textContent =
+      (metrics.memory?.zram?.ratio ? metrics.memory.zram.ratio + 'x' : 'N/A');
 
     // Format uptime
     const uptimeHours = Math.floor(metrics.uptime_seconds / 3600);
@@ -380,10 +387,11 @@ async function updateDebugData() {
 
     // Update memory history
     const timestamp = new Date().toLocaleTimeString();
-    const totalMem = metrics.memory.system_total_mb;
+    const totalMem = metrics.memory.physical_mb;
     const pifinderMem = metrics.memory.pifinder_total_mb;
     const gpuMem = metrics.memory.gpu_mem_mb || 0; // Dynamic from vcgencmd
     const availableMem = metrics.memory.available_mb;
+    const effectiveFree = metrics.memory.effective_free_mb || availableMem;
     const otherMem = Math.max(0, totalMem - pifinderMem - gpuMem - availableMem);
 
     memoryHistory.push({
@@ -392,7 +400,8 @@ async function updateDebugData() {
       gpu: gpuMem,
       other: Math.round(otherMem),
       available: Math.round(availableMem),
-      total: Math.round(totalMem)
+      total: Math.round(totalMem),
+      effectiveFree: Math.round(effectiveFree)
     });
 
     // Keep last MAX_HISTORY entries

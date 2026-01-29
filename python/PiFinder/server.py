@@ -1065,6 +1065,24 @@ class Server:
             except (psutil.NoSuchProcess, psutil.AccessDenied):
                 return 'Unknown'
 
+        def _get_zram_stats():
+            """Get zram compression stats if available."""
+            try:
+                with open('/sys/block/zram0/mm_stat') as f:
+                    parts = f.read().split()
+                    orig = int(parts[0])
+                    comp = int(parts[1])
+                    used = int(parts[2])
+                    return {
+                        'uncompressed_mb': round(orig/1024/1024, 1),
+                        'compressed_mb': round(comp/1024/1024, 1),
+                        'ram_cost_mb': round(used/1024/1024, 1),
+                        'ratio': round(orig/comp, 2) if comp > 0 else 0,
+                        'savings_mb': round((orig - used)/1024/1024, 1),
+                    }
+            except:
+                return None
+
         @app.route("/api/metrics")
         def api_metrics():
             """Return JSON performance metrics"""
@@ -1197,16 +1215,15 @@ class Server:
                     'timestamp': datetime.now(timezone.utc).isoformat(),
                     'uptime_seconds': round(uptime_seconds, 1),
                     'uptime_formatted': f"{int(uptime_seconds // 3600)}h {int((uptime_seconds % 3600) // 60)}m {int(uptime_seconds % 60)}s",
-                    'memory': {
+                    'memory': (lambda zram: {
                         'pifinder_total_mb': round(total_rss / 1024 / 1024, 1),
-                        'system_total_mb': round(sys_mem.total / 1024 / 1024, 1),
-                        'system_percent': sys_mem.percent,
+                        'physical_mb': round(sys_mem.total / 1024 / 1024, 1),
                         'available_mb': round(sys_mem.available / 1024 / 1024, 1),
+                        'effective_free_mb': round(sys_mem.available / 1024 / 1024 + (zram['savings_mb'] if zram else 0), 1),
                         'gpu_mem_mb': self.gpu_mem_mb,
-                        'swap_used_mb': round(sys_swap.used / 1024 / 1024, 1),
-                        'swap_percent': sys_swap.percent,
+                        'zram': zram,
                         'processes': sorted(pifinder_procs, key=lambda x: x['rss_mb'], reverse=True)
-                    },
+                    })(_get_zram_stats()),
                     'gc': gc_stats,
                     'solver': solver_metrics,
                     'gps': gps_status,
