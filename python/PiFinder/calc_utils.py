@@ -25,12 +25,22 @@ class FastAltAz:
     """
     Adapted from example at:
     http://www.stargazing.net/kepler/altaz.html
+
+    Optimized for hot-path usage in catalog filtering:
+    - Pre-computes latitude trig values in __init__
+    - Uses math.radians() instead of repeated * pi / 180
+    - Provides vectorized batch method for filtering many objects
     """
 
     def __init__(self, lat, lon, dt):
         self.lat = lat
         self.lon = lon
         self.dt = dt
+
+        # Pre-compute latitude trig (hot path optimization)
+        lat_rad = math.radians(lat)
+        self._sin_lat = math.sin(lat_rad)
+        self._cos_lat = math.cos(lat_rad)
 
         j2000 = datetime(2000, 1, 1, 12, 0, 0)
         utc_tz = pytz.timezone("UTC")
@@ -45,30 +55,58 @@ class FastAltAz:
         self.local_siderial_time = lst % 360
 
     def radec_to_altaz(self, ra, dec, alt_only=False) -> Tuple[float, Optional[float]]:
-        hour_angle = (self.local_siderial_time - ra) % 360
+        hour_angle_rad = math.radians((self.local_siderial_time - ra) % 360)
+        dec_rad = math.radians(dec)
 
-        _alt = math.sin(dec * math.pi / 180) * math.sin(
-            self.lat * math.pi / 180
-        ) + math.cos(dec * math.pi / 180) * math.cos(
-            self.lat * math.pi / 180
-        ) * math.cos(hour_angle * math.pi / 180)
+        sin_dec = math.sin(dec_rad)
+        cos_dec = math.cos(dec_rad)
 
-        alt = math.asin(_alt) * 180 / math.pi
+        # Use pre-computed lat trig
+        _alt = sin_dec * self._sin_lat + cos_dec * self._cos_lat * math.cos(hour_angle_rad)
+        alt = math.degrees(math.asin(_alt))
+
         if alt_only:
             return alt, None
 
-        _az = (
-            math.sin(dec * math.pi / 180)
-            - math.sin(alt * math.pi / 180) * math.sin(self.lat * math.pi / 180)
-        ) / (math.cos(alt * math.pi / 180) * math.cos(self.lat * math.pi / 180))
+        alt_rad = math.radians(alt)
+        sin_alt = math.sin(alt_rad)
+        cos_alt = math.cos(alt_rad)
 
-        _az = math.acos(_az) * 180 / math.pi
+        _az = (sin_dec - sin_alt * self._sin_lat) / (cos_alt * self._cos_lat)
+        # Clamp for numerical stability
+        _az = max(-1.0, min(1.0, _az))
+        _az = math.degrees(math.acos(_az))
 
-        if math.sin(hour_angle * math.pi / 180) < 0:
+        if math.sin(hour_angle_rad) < 0:
             az = _az
         else:
             az = 360 - _az
         return alt, az
+
+    def radec_to_alt_batch(self, ra_array, dec_array) -> np.ndarray:
+        """
+        Vectorized altitude calculation for batch filtering.
+
+        Args:
+            ra_array: Array of RA values in degrees
+            dec_array: Array of Dec values in degrees
+
+        Returns:
+            Array of altitude values in degrees
+        """
+        ra = np.asarray(ra_array, dtype=np.float64)
+        dec = np.asarray(dec_array, dtype=np.float64)
+
+        hour_angle_rad = np.deg2rad((self.local_siderial_time - ra) % 360)
+        dec_rad = np.deg2rad(dec)
+
+        sin_dec = np.sin(dec_rad)
+        cos_dec = np.cos(dec_rad)
+
+        _alt = sin_dec * self._sin_lat + cos_dec * self._cos_lat * np.cos(hour_angle_rad)
+        # Clamp for numerical stability
+        _alt = np.clip(_alt, -1.0, 1.0)
+        return np.rad2deg(np.arcsin(_alt))
 
 
 def ra_to_deg(ra_h, ra_m, ra_s):

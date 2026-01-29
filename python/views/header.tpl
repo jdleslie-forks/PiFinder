@@ -21,6 +21,7 @@
         <li><a href="/locations">Locations</a></li>
         <li><a href="/equipment">Equipment</a></li>
         <li><a href="/tools">Tools</a></li>
+        <li><a href="/debug">Debug</a></li>
         <li><a href="/logs">Logs</a></li>
       </ul>
 
@@ -32,6 +33,7 @@
         <li><a href="/locations">Locations</a></li>
         <li><a href="/equipment">Equipment</a></li>
         <li><a href="/tools">Tools</a></li>
+        <li><a href="/debug">Debug</a></li>
         <li><a href="/logs">Logs</a></li>
       </ul>
       <a href="#" data-target="nav-mobile" class="sidenav-trigger"><i class="material-icons">menu</i></a>

@@ -89,6 +89,12 @@ class UIObjectList(UITextMenu):
         self.catalog_info_2: str = ""
         self._was_loading: bool = False  # Track loading state to detect completion
 
+        # Pagination state for infinite scroll
+        self._page_size: int = 100
+        self._current_offset: int = 0
+        self._has_more: bool = True
+        self._loading_more: bool = False
+
         # Init display mode defaults
         self.mode_cycle = cycle(DisplayModes)
         self.current_mode = next(self.mode_cycle)
@@ -163,6 +169,9 @@ class UIObjectList(UITextMenu):
         self.refresh_object_list(force_update=True)
         self.nearby = Nearby(self.shared_state)
 
+        # Track catalog code for pagination
+        self._paginated_catalog_code: Union[str, None] = None
+
     def refresh_object_list(self, force_update=False):
         """
         Called whenever the object list might need to be updated.
@@ -183,20 +192,49 @@ class UIObjectList(UITextMenu):
             self._menu_items = self.catalogs.get_objects(
                 only_selected=True, filtered=True
             )
+            self._has_more = False  # Multi-catalog filtered lists don't paginate
+            self._paginated_catalog_code = None
 
         if self.item_definition["objects"] == "catalog":
-            for catalog in self.catalogs.get_catalogs(only_selected=False):
-                if catalog.catalog_code == self.item_definition["value"]:
-                    self._menu_items = catalog.get_filtered_objects()
-                    age = catalog.get_age()
-                    self.catalog_info_2 = "" if age is None else str(round(age, 0))
+            catalog_code = self.item_definition["value"]
+            catalog = self.catalogs.get_catalog_by_code(catalog_code)
+            # Virtual catalogs (Planets, Comets) have full Catalog interface
+            if hasattr(catalog, 'get_filtered_objects'):
+                self._menu_items = catalog.get_filtered_objects()
+                self._has_more = False  # Virtual catalogs load all at once
+                self._paginated_catalog_code = None
+                age = catalog.get_age() if hasattr(catalog, 'get_age') else None
+                self.catalog_info_2 = "" if age is None else str(round(age, 0))
+            else:
+                # For lazy catalogs, use paginated loading
+                # Reset pagination state
+                self._current_offset = 0
+                self._has_more = True
+                self._paginated_catalog_code = catalog_code
+                # Temporarily modify filter to get objects from just this catalog
+                saved_catalogs = self.catalogs.catalog_filter.selected_catalogs.copy()
+                self.catalogs.catalog_filter.selected_catalogs = {catalog_code}
+                # Load first page
+                self._menu_items = self.catalogs.get_objects(
+                    only_selected=True, filtered=True,
+                    limit=self._page_size, offset=0
+                )
+                self.catalogs.catalog_filter.selected_catalogs = saved_catalogs
+                # Check if there are more items
+                self._has_more = len(self._menu_items) >= self._page_size
+                self._current_offset = len(self._menu_items)
+                self.catalog_info_2 = ""
 
         if self.item_definition["objects"] == "recent":
             self._menu_items = self.ui_state.recent_list()
+            self._has_more = False
+            self._paginated_catalog_code = None
 
         if self.item_definition["objects"] == "custom":
             # item_definition must contain a list of CompositeObjects
             self._menu_items = self.item_definition["object_list"]
+            self._has_more = False
+            self._paginated_catalog_code = None
 
         self.catalog_info_1 = str(self.get_nr_of_menu_items())
         self._menu_items_sorted = self._menu_items
@@ -281,16 +319,31 @@ class UIObjectList(UITextMenu):
         self.update()
 
         if self.current_sort == SortOrder.NEAREST:
-            if self.shared_state.solution() is None:
+            solution = self.shared_state.solution()
+            if solution is None or solution.get("RA") is None:
                 self.message(_("No Solve Yet"), 1)
                 self.current_sort = SortOrder.CATALOG_SEQUENCE
             else:
-                if self.catalogs.catalog_filter:
-                    self._menu_items = self.catalogs.catalog_filter.apply(
-                        self._menu_items
+                # Check if we're using lazy catalogs
+                from PiFinder.catalogs_lazy import LazyCatalogs
+                if isinstance(self.catalogs, LazyCatalogs):
+                    # Use spatial query for nearby objects
+                    ra, dec = solution["RA"], solution["Dec"]
+                    self._menu_items = self.catalogs.get_objects(
+                        only_selected=True,
+                        filtered=True,
+                        limit=100,
+                        nearby_position=(ra, dec)
                     )
-                self.nearby.set_items(self._menu_items)
-                self.nearby_refresh()
+                    self._menu_items_sorted = self._menu_items
+                else:
+                    # Eager catalogs - use existing KDTree approach
+                    if self.catalogs.catalog_filter:
+                        self._menu_items = self.catalogs.catalog_filter.apply(
+                            self._menu_items
+                        )
+                    self.nearby.set_items(self._menu_items)
+                    self.nearby_refresh()
                 self._current_item_index = 0
 
         if self.current_sort == SortOrder.CATALOG_SEQUENCE:
@@ -298,11 +351,100 @@ class UIObjectList(UITextMenu):
             self._current_item_index = 0
         self.update()
 
+    def load_more_items(self) -> bool:
+        """
+        Load next page of items for infinite scroll.
+
+        Returns True if more items were loaded, False otherwise.
+        Only works for paginated single-catalog lists.
+        """
+        # Only load more for paginated catalog lists
+        if not self._paginated_catalog_code:
+            return False
+
+        # Don't load if no more items or already loading
+        if not self._has_more or self._loading_more:
+            return False
+
+        # Only load more in CATALOG_SEQUENCE sort order
+        # (NEAREST needs all items for proper distance calc)
+        if self.current_sort != SortOrder.CATALOG_SEQUENCE:
+            return False
+
+        self._loading_more = True
+
+        try:
+            # Temporarily modify filter to get objects from just this catalog
+            saved_catalogs = self.catalogs.catalog_filter.selected_catalogs.copy()
+            self.catalogs.catalog_filter.selected_catalogs = {self._paginated_catalog_code}
+
+            # Load next page
+            new_items = self.catalogs.get_objects(
+                only_selected=True, filtered=True,
+                limit=self._page_size, offset=self._current_offset
+            )
+
+            self.catalogs.catalog_filter.selected_catalogs = saved_catalogs
+
+            if new_items:
+                # Extend existing list (menu_items_sorted shares reference)
+                self._menu_items.extend(new_items)
+                self._current_offset += len(new_items)
+                # Check if there are more items
+                self._has_more = len(new_items) >= self._page_size
+                # Update count display
+                self.catalog_info_1 = str(self.get_nr_of_menu_items())
+                return True
+            else:
+                self._has_more = False
+                return False
+        finally:
+            self._loading_more = False
+
+    def menu_scroll(self, direction: int):
+        """Override to trigger infinite scroll when near end of list."""
+        # Call parent scroll logic
+        self._current_item_index += direction
+        if self._current_item_index < 0:
+            self._current_item_index = 0
+
+        nr_items = self.get_nr_of_menu_items()
+        if self._current_item_index >= nr_items:
+            self._current_item_index = nr_items - 1
+
+        # Check if we need to load more items (within 20 items of end)
+        if (self._has_more and
+            self._paginated_catalog_code and
+            direction > 0 and
+            nr_items > 0 and
+            self._current_item_index >= nr_items - 20):
+            self.load_more_items()
+
     def nearby_refresh(self):
-        self._menu_items_sorted = self.nearby.refresh()
-        if self._menu_items_sorted is None:
+        # Check if we're using lazy catalogs
+        from PiFinder.catalogs_lazy import LazyCatalogs
+        if isinstance(self.catalogs, LazyCatalogs):
+            # Use spatial query for lazy catalogs
+            solution = self.shared_state.solution()
+            if solution is None or solution.get("RA") is None:
+                self._menu_items_sorted = self._menu_items
+                self.message(_("No Solve Yet"), 1)
+                return
+
+            ra, dec = solution["RA"], solution["Dec"]
+            self._menu_items = self.catalogs.get_objects(
+                only_selected=True,
+                filtered=True,
+                limit=100,
+                nearby_position=(ra, dec)
+            )
             self._menu_items_sorted = self._menu_items
-            self.message(_("No Solve Yet"), 1)
+        else:
+            # Eager catalogs - use existing KDTree approach
+            self._menu_items_sorted = self.nearby.refresh()
+            if self._menu_items_sorted is None:
+                self._menu_items_sorted = self._menu_items
+                self.message(_("No Solve Yet"), 1)
 
     def format_az_alt(self, point_az, point_alt):
         if point_az >= 0:
@@ -771,6 +913,11 @@ class UIObjectList(UITextMenu):
         self.menu_scroll(-1)
 
     def key_long_down(self):
+        # Load all remaining items if using infinite scroll
+        if self._has_more and self._paginated_catalog_code:
+            while self._has_more:
+                if not self.load_more_items():
+                    break
         self.menu_scroll(999999999999999999999999999)
 
     def mm_change_sort(self, marking_menu, menu_item):

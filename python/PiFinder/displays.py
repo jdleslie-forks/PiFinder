@@ -108,7 +108,8 @@ class DisplaySSD1351(DisplayBase):
 
     def __init__(self):
         # init display  (SPI hardware)
-        serial = spi(device=0, port=0, bus_speed_hz=40000000)
+        # 20MHz for Pi Zero 2W compatibility (40MHz causes artifacts under load)
+        serial = spi(device=0, port=0, bus_speed_hz=20000000)
         device_serial = ssd1351(serial, rotate=0, bgr=True)
 
         device_serial.capabilities(
@@ -162,6 +163,9 @@ class DisplayST7789(DisplayBase):
 
 
 def get_display(display_hardware: str) -> DisplayBase:
+    if display_hardware == "capture":
+        return DisplayCapture()
+
     if display_hardware == "pg_128":
         return DisplayPygame_128()
 
@@ -177,3 +181,23 @@ def get_display(display_hardware: str) -> DisplayBase:
     else:
         print("Hardware platform not recognized")
         return DisplaySSD1351()
+
+
+
+class DisplayCapture(DisplayBase):
+    """Headless capture display for testing - no X11 needed."""
+    resolution = (128, 128)
+
+    def __init__(self):
+        from luma.emulator.device import capture
+        self.device = capture(
+            width=self.resolution[0],
+            height=self.resolution[1],
+            mode="RGB",
+            file_template="/tmp/pf_{0:06d}.png"
+        )
+        super().__init__()
+
+    def set_brightness(self, level):
+        """Brightness not supported on capture device."""
+        pass

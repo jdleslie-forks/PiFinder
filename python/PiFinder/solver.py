@@ -18,6 +18,7 @@ from time import perf_counter as precision_timestamp
 import os
 import threading
 import grpc
+from PIL import Image
 
 from PiFinder import state_utils
 from PiFinder import utils
@@ -468,6 +469,54 @@ def solver(
                             solved["cam_solve_time"] = solved["solve_time"]
                             # Mark successful solve - use same timestamp as last_solve_attempt for comparison
                             solved["last_solve_success"] = solved["last_solve_attempt"]
+
+                            # Capture solved frame data for API access
+                            try:
+                                # Convert numpy array to PIL Image
+                                if np_image.dtype == np.uint16:
+                                    # Convert 16-bit to 8-bit for display
+                                    img_8bit = (np_image / 256).astype(np.uint8)
+                                    pil_image = Image.fromarray(img_8bit, mode='L')
+                                else:
+                                    pil_image = Image.fromarray(np_image, mode='L')
+
+                                # Build frame data dict
+                                frame_data = {
+                                    "image": pil_image,
+                                    "centroids": centroids.tolist() if isinstance(centroids, np.ndarray) else centroids,
+                                    "num_centroids": len(centroids),
+                                    "solution": {
+                                        "RA": solved.get("RA"),
+                                        "Dec": solved.get("Dec"),
+                                        "Roll": solved.get("Roll"),
+                                        "FOV": solved.get("FOV"),
+                                        "RMSE": solved.get("RMSE"),
+                                        "Matches": solved.get("Matches"),
+                                        "Prob": solved.get("Prob"),
+                                        "constellation": solved.get("constellation"),
+                                        "RA_target": solved.get("RA_target"),
+                                        "Dec_target": solved.get("Dec_target"),
+                                        "Alt": solved.get("Alt"),
+                                        "Az": solved.get("Az"),
+                                    },
+                                    "timing": {
+                                        "t_extract_ms": t_extract,
+                                        "t_solve_ms": solved.get("T_solve"),
+                                        "total_ms": t_extract + solved.get("T_solve", 0),
+                                    },
+                                    "camera": {
+                                        "exposure_time_us": last_image_metadata.get("exposure_time"),
+                                        "exposure_start": last_image_metadata.get("exposure_start"),
+                                        "exposure_end": last_image_metadata.get("exposure_end"),
+                                    },
+                                    "metadata": {
+                                        "solve_time": solved.get("solve_time"),
+                                        "camera_type": shared_state.camera_type(),
+                                    },
+                                }
+                                shared_state.set_last_solved_frame(frame_data)
+                            except Exception as e:
+                                logger.error(f"Failed to capture solved frame data: {e}")
 
                             logger.info(
                                 f"Solve SUCCESS - {len(centroids)} centroids → "

@@ -4,10 +4,13 @@ import logging
 import time
 import uuid
 import os
+import gc
+from collections import deque
 from datetime import datetime, timezone
 
+import psutil
 import pydeepskylog as pds
-from PIL import Image
+from PIL import Image, ImageDraw
 from PiFinder import utils, calc_utils, config
 from PiFinder.db.observations_db import (
     ObservationsDatabase,
@@ -69,6 +72,15 @@ class Server:
         self.lon = None
         self.altitude = None
         self.gps_locked = False
+        # Track PiFinder start time for uptime
+        self.start_time = time.time()
+        # Track recent solve timings (timestamp, extract_ms, solve_ms, total_ms)
+        # Store up to 300 solves (~5 minutes at 1 solve/sec)
+        self.solve_history = deque(maxlen=300)
+        self.last_solve_timestamp = None
+
+        # Get GPU memory allocation at startup
+        self.gpu_mem_mb = self._get_gpu_memory()
 
         if is_debug:
             logger.setLevel(logging.DEBUG)
@@ -768,6 +780,11 @@ class Server:
         def tools():
             return template("tools")
 
+        @app.route("/debug")
+        @auth_required
+        def debug_page():
+            return template("debug")
+
         @app.route("/logs")
         @auth_required
         def logs_page():
@@ -936,6 +953,272 @@ class Server:
 
             return img_byte_arr
 
+        @app.route("/api/solved_frame/data")
+        def api_solved_frame_data():
+            """Return JSON data about the last solved frame"""
+            response.content_type = "application/json"
+
+            try:
+                frame_data = self.shared_state.last_solved_frame()
+                if frame_data is None:
+                    return json.dumps({"error": "No solved frame available"})
+
+                # Get current solution from integrator for updated Alt/Az
+                current_solution = self.shared_state.solution()
+
+                # Merge current Alt/Az into frame solution data
+                solution_data = frame_data.get("solution", {}).copy()
+                if current_solution:
+                    # Update with integrator-calculated Alt/Az if available
+                    camera_center = current_solution.get("camera_center", {})
+                    if camera_center.get("Alt") is not None:
+                        solution_data["Alt"] = camera_center.get("Alt")
+                    if camera_center.get("Az") is not None:
+                        solution_data["Az"] = camera_center.get("Az")
+
+                # Convert to JSON-serializable format
+                result = {
+                    "solution": solution_data,
+                    "camera": frame_data.get("camera"),
+                    "timing": frame_data.get("timing"),
+                    "num_centroids": frame_data.get("num_centroids"),
+                    "centroids": frame_data.get("centroids"),
+                    "metadata": frame_data.get("metadata"),
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                }
+                return json.dumps(result, indent=2)
+            except Exception as e:
+                logger.error(f"Error retrieving solved frame data: {e}")
+                return json.dumps({"error": str(e)})
+
+        @app.route("/api/solved_frame/image")
+        def api_solved_frame_image():
+            """Return the last solved frame as PNG with centroids overlaid"""
+            response.content_type = "image/png"
+
+            try:
+                frame_data = self.shared_state.last_solved_frame()
+                if frame_data is None:
+                    # Return empty image
+                    empty_img = Image.new("RGB", (512, 512), color=(0, 0, 0))
+                    img_byte_arr = io.BytesIO()
+                    empty_img.save(img_byte_arr, format="PNG")
+                    return img_byte_arr.getvalue()
+
+                # Get the original image
+                img = frame_data.get("image")
+                if img is None:
+                    empty_img = Image.new("RGB", (512, 512), color=(0, 0, 0))
+                    img_byte_arr = io.BytesIO()
+                    empty_img.save(img_byte_arr, format="PNG")
+                    return img_byte_arr.getvalue()
+
+                # Convert to RGB if grayscale
+                if img.mode != "RGB":
+                    img = img.convert("RGB")
+
+                # Draw centroids
+                draw = ImageDraw.Draw(img)
+                centroids = frame_data.get("centroids", [])
+                for centroid in centroids:
+                    x, y = int(centroid[0]), int(centroid[1])
+                    # Draw a small circle around each centroid
+                    r = 5
+                    draw.ellipse([x-r, y-r, x+r, y+r], outline="red", width=2)
+
+                # Save to bytes
+                img_byte_arr = io.BytesIO()
+                img.save(img_byte_arr, format="PNG")
+                return img_byte_arr.getvalue()
+
+            except Exception as e:
+                logger.error(f"Error generating solved frame image: {e}")
+                empty_img = Image.new("RGB", (512, 512), color=(64, 0, 0))
+                img_byte_arr = io.BytesIO()
+                empty_img.save(img_byte_arr, format="PNG")
+                return img_byte_arr.getvalue()
+
+        def _identify_process_role(proc):
+            """Identify the role of a PiFinder process based on parent/child relationships."""
+            try:
+                # Main process is the parent of all others
+                # It's the one whose parent is not another PiFinder process
+                parent = proc.parent()
+                if parent:
+                    parent_cmdline = ' '.join(parent.cmdline() if parent.cmdline() else [])
+                    if 'PiFinder' not in parent_cmdline:
+                        return 'Main/UI'
+
+                # Try to identify by open files or connections
+                try:
+                    connections = proc.connections()
+                    for conn in connections:
+                        if conn.status == 'LISTEN' and conn.laddr.port == 8080:
+                            return 'Webserver'
+                        if hasattr(conn, 'laddr') and hasattr(conn.laddr, 'port') and conn.laddr.port == 4030:
+                            return 'SkySafari'
+                except (psutil.AccessDenied, AttributeError):
+                    pass
+
+                # Default to generic worker
+                return 'Worker'
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                return 'Unknown'
+
+        @app.route("/api/metrics")
+        def api_metrics():
+            """Return JSON performance metrics"""
+            response.content_type = "application/json"
+
+            try:
+                # Update GPS state
+                self.update_gps()
+
+                # Calculate uptime
+                uptime_seconds = time.time() - self.start_time
+
+                # Get all PiFinder processes
+                pifinder_procs = []
+                total_rss = 0
+                for proc in psutil.process_iter(['pid', 'name', 'cmdline', 'cpu_percent', 'create_time']):
+                    cmdline_str = str(proc.info.get('cmdline', []))
+                    if 'PiFinder' in cmdline_str:
+                        try:
+                            mem = proc.memory_info()
+                            total_rss += mem.rss
+                            role = _identify_process_role(proc)
+                            pifinder_procs.append({
+                                'pid': proc.info['pid'],
+                                'role': role,
+                                'rss_mb': round(mem.rss / 1024 / 1024, 1),
+                                'cpu_percent': proc.info['cpu_percent']
+                            })
+                        except (psutil.NoSuchProcess, psutil.AccessDenied):
+                            pass
+
+                # System memory
+                sys_mem = psutil.virtual_memory()
+                sys_swap = psutil.swap_memory()
+
+                # Garbage collection stats
+                gc_counts = gc.get_count()
+                gc_stats = {
+                    'generation0': gc_counts[0],
+                    'generation1': gc_counts[1],
+                    'generation2': gc_counts[2],
+                }
+
+                # Solve metrics from shared state
+                solution = self.shared_state.solution()
+                last_img = self.shared_state.last_image_metadata()
+                last_solved = self.shared_state.last_solved_frame()
+
+                solver_metrics = {
+                    'last_solve_time': solution.get('solve_time') if solution else None,
+                    'imu_delta': last_img.get('imu_delta') if last_img else None,
+                }
+
+                if last_solved:
+                    timing = last_solved.get('timing', {})
+
+                    # Create a unique key for this solve based on timing signature
+                    # This handles cases where solve_time might not update
+                    solve_signature = (
+                        timing.get('t_extract_ms'),
+                        timing.get('t_solve_ms'),
+                        timing.get('total_ms'),
+                    )
+
+                    # Track this solve in history if it's new (different from last)
+                    if solve_signature != self.last_solve_timestamp:
+                        solve_time = solution.get('solve_time') if solution else time.time()
+                        self.solve_history.append({
+                            'timestamp': solve_time,
+                            'extract_ms': timing.get('t_extract_ms'),
+                            'solve_ms': timing.get('t_solve_ms'),
+                            'total_ms': timing.get('total_ms'),
+                        })
+                        self.last_solve_timestamp = solve_signature
+
+                    # Calculate windowed statistics
+                    now = time.time()
+                    windows = {
+                        'last_10': {'count': 10, 'solves': []},
+                        'last_1min': {'seconds': 60, 'solves': []},
+                        'last_5min': {'seconds': 300, 'solves': []},
+                    }
+
+                    # Populate windows
+                    for solve in reversed(self.solve_history):
+                        # Last 10 solves
+                        if len(windows['last_10']['solves']) < 10:
+                            windows['last_10']['solves'].append(solve)
+
+                        # Time-based windows
+                        age = now - solve['timestamp']
+                        if age <= 60:
+                            windows['last_1min']['solves'].append(solve)
+                        if age <= 300:
+                            windows['last_5min']['solves'].append(solve)
+
+                    # Calculate stats for each window
+                    timing_windows = {}
+                    for window_name, window_data in windows.items():
+                        solves = window_data['solves']
+                        if solves:
+                            timing_windows[window_name] = {
+                                'count': len(solves),
+                                'extract_mean_ms': round(sum(s['extract_ms'] for s in solves if s['extract_ms']) / len([s for s in solves if s['extract_ms']]), 2) if any(s['extract_ms'] for s in solves) else None,
+                                'extract_max_ms': round(max(s['extract_ms'] for s in solves if s['extract_ms']), 2) if any(s['extract_ms'] for s in solves) else None,
+                                'solve_mean_ms': round(sum(s['solve_ms'] for s in solves if s['solve_ms']) / len([s for s in solves if s['solve_ms']]), 2) if any(s['solve_ms'] for s in solves) else None,
+                                'solve_max_ms': round(max(s['solve_ms'] for s in solves if s['solve_ms']), 2) if any(s['solve_ms'] for s in solves) else None,
+                                'total_mean_ms': round(sum(s['total_ms'] for s in solves if s['total_ms']) / len([s for s in solves if s['total_ms']]), 2) if any(s['total_ms'] for s in solves) else None,
+                                'total_max_ms': round(max(s['total_ms'] for s in solves if s['total_ms']), 2) if any(s['total_ms'] for s in solves) else None,
+                                'individual_solves': solves  # Include individual solve data for charting
+                            }
+                        else:
+                            timing_windows[window_name] = {'count': 0}
+
+                    solver_metrics.update({
+                        'last_extract_ms': timing.get('t_extract_ms'),
+                        'last_solve_ms': timing.get('t_solve_ms'),
+                        'last_total_ms': timing.get('total_ms'),
+                        'last_num_centroids': last_solved.get('num_centroids'),
+                        'timing_windows': timing_windows,
+                    })
+
+                # GPS status
+                gps_status = {
+                    'locked': self.gps_locked,
+                    'sats': self.shared_state.sats(),
+                }
+
+                metrics = {
+                    'timestamp': datetime.now(timezone.utc).isoformat(),
+                    'uptime_seconds': round(uptime_seconds, 1),
+                    'uptime_formatted': f"{int(uptime_seconds // 3600)}h {int((uptime_seconds % 3600) // 60)}m {int(uptime_seconds % 60)}s",
+                    'memory': {
+                        'pifinder_total_mb': round(total_rss / 1024 / 1024, 1),
+                        'system_total_mb': round(sys_mem.total / 1024 / 1024, 1),
+                        'system_percent': sys_mem.percent,
+                        'available_mb': round(sys_mem.available / 1024 / 1024, 1),
+                        'gpu_mem_mb': self.gpu_mem_mb,
+                        'swap_used_mb': round(sys_swap.used / 1024 / 1024, 1),
+                        'swap_percent': sys_swap.percent,
+                        'processes': sorted(pifinder_procs, key=lambda x: x['rss_mb'], reverse=True)
+                    },
+                    'gc': gc_stats,
+                    'solver': solver_metrics,
+                    'gps': gps_status,
+                    'cpu_load': list(os.getloadavg())
+                }
+
+                return json.dumps(metrics, indent=2)
+
+            except Exception as e:
+                logger.error(f"Error generating metrics: {e}")
+                return json.dumps({"error": str(e)})
+
         @auth_required
         def gps_lock(lat: float = 50, lon: float = 3, altitude: float = 10):
             msg = (
@@ -982,6 +1265,29 @@ class Server:
 
     def key_callback(self, key):
         self.keyboard_queue.put(key)
+
+    def _get_gpu_memory(self):
+        """Get GPU memory allocation in MB using vcgencmd"""
+        try:
+            import subprocess
+            result = subprocess.run(
+                ["vcgencmd", "get_mem", "gpu"],
+                capture_output=True,
+                text=True,
+                timeout=2
+            )
+            if result.returncode == 0:
+                # Output format: "gpu=32M\n"
+                output = result.stdout.strip()
+                if "=" in output:
+                    mem_str = output.split("=")[1].rstrip("M")
+                    return int(mem_str)
+        except Exception as e:
+            logger.warning(f"Could not determine GPU memory: {e}")
+
+        # Default fallback - Pi 4 default is 76MB, Pi Zero 2W should be 32MB
+        # Return None to indicate unknown
+        return None
 
     def update_gps(self):
         """Update GPS information"""

@@ -10,7 +10,37 @@ function
 
 from PIL import Image, ImageChops
 import numpy as np
-import scipy.ndimage
+
+
+def uniform_filter_numpy(image: np.ndarray, size: int = 25) -> np.ndarray:
+    """
+    Box blur using cumulative sums (fast, no scipy dependency).
+
+    Replaces scipy.ndimage.filters.uniform_filter to eliminate
+    ~60 MB scipy import from MAIN process.
+    """
+    if size <= 1:
+        return image
+
+    # Pad image to handle edges
+    pad = size // 2
+    padded = np.pad(image, pad, mode='reflect')
+
+    # Cumulative sum approach for O(1) per-pixel box blur
+    # Compute cumulative sum along rows
+    cumsum = np.cumsum(padded, axis=0, dtype=np.float64)
+    cumsum = np.insert(cumsum, 0, 0, axis=0)
+    row_sum = cumsum[size:] - cumsum[:-size]
+
+    # Compute cumulative sum along columns
+    cumsum = np.cumsum(row_sum, axis=1, dtype=np.float64)
+    cumsum = np.insert(cumsum, 0, 0, axis=1)
+    box_sum = cumsum[:, size:] - cumsum[:, :-size]
+
+    # Average
+    result = box_sum / (size * size)
+
+    return result.astype(image.dtype)
 
 
 def make_red(in_image, colors):
@@ -51,10 +81,7 @@ def subtract_background(image, percent=1):
     else:
         assert image.ndim == 2, "Image must be 2D or 3D array"
 
-    image = image - (
-        scipy.ndimage.filters.uniform_filter(image, size=25, output=image.dtype)
-        * percent
-    )
+    image = image - (uniform_filter_numpy(image, size=25) * percent)
     return Image.fromarray(image)
 
 

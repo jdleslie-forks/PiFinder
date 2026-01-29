@@ -40,7 +40,8 @@ from PiFinder import server
 from PiFinder import keyboard_interface
 
 from PiFinder.multiproclogging import MultiprocLogging
-from PiFinder.catalogs import CatalogBuilder, CatalogFilter, Catalogs
+from PiFinder.catalogs import Catalogs
+from PiFinder.catalogs_lazy import create_lazy_catalogs, LazyCatalogs
 from PiFinder.calc_utils import sf_utils
 
 from PiFinder.ui.console import UIConsole
@@ -513,13 +514,10 @@ def main(
         # Start profiling (uncomment to enable performance analysis)
         # profiler, startup_profile_start = start_profiling()
 
-        # Initialize Catalogs (pass ui_queue for background loading completion signal)
-        catalogs: Catalogs = CatalogBuilder().build(shared_state, ui_queue)
-
-        # Establish the common catalog filter object
-        _new_filter = CatalogFilter(shared_state=shared_state)
-        _new_filter.load_from_config(cfg)
-        catalogs.set_catalog_filter(_new_filter)
+        # Use lazy catalogs for reduced memory footprint (saves ~190MB)
+        logger.info("Using lazy catalog loading (memory-optimized)")
+        catalogs = create_lazy_catalogs(shared_state)
+        catalogs.catalog_filter.load_from_config(cfg)
         console.write("   Menus")
         console.update()
 

@@ -330,7 +330,7 @@ def check_and_sync_gpsd_config(baud_rate: int) -> bool:
     and updates it only if necessary.
 
     Args:
-        baud_rate: The desired baud rate (9600 or 115200)
+        baud_rate: The desired baud rate (4800, 9600, or 115200)
 
     Returns:
         True if configuration was updated, False if already correct
@@ -343,7 +343,10 @@ def check_and_sync_gpsd_config(baud_rate: int) -> bool:
             content = f.read()
 
         # Determine expected GPSD_OPTIONS
-        if baud_rate == 115200:
+        if baud_rate == 4800:
+            # NOTE: the space before -s in the next line is really needed
+            expected_options = 'GPSD_OPTIONS=" -s 4800"'
+        elif baud_rate == 115200:
             # NOTE: the space before -s in the next line is really needed
             expected_options = 'GPSD_OPTIONS=" -s 115200"'
         else:
@@ -373,7 +376,7 @@ def update_gpsd_config(baud_rate: int) -> None:
     and restarts the GPSD service.
 
     Args:
-        baud_rate: The baud rate to configure (9600 or 115200)
+        baud_rate: The baud rate to configure (4800, 9600, or 115200)
     """
     logger.info(f"SYS: Updating GPSD config with baud rate {baud_rate}")
 
@@ -386,7 +389,10 @@ def update_gpsd_config(baud_rate: int) -> None:
         updated_lines = []
         for line in lines:
             if line.startswith("GPSD_OPTIONS="):
-                if baud_rate == 115200:
+                if baud_rate == 4800:
+                    # NOTE: the space before -s in the next line is really needed
+                    updated_lines.append('GPSD_OPTIONS=" -s 4800"\n')
+                elif baud_rate == 115200:
                     # NOTE: the space before -s in the next line is really needed
                     updated_lines.append('GPSD_OPTIONS=" -s 115200"\n')
                 else:

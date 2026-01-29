@@ -268,6 +268,7 @@ class SharedStateObj:
         self.__camera_align = False
         self.__camera_type = "imx296"  # Default, will be set by camera process
         self.__cam_raw = None
+        self.__last_solved_frame = None  # Stores last solved frame for API access
         # Are we prepared to do alt/az math
         # We need gps lock and datetime
         self.__tz_finder = TimezoneFinder()
@@ -435,6 +436,12 @@ class SharedStateObj:
 
     def set_cam_raw(self, v):
         self.__cam_raw = v
+
+    def last_solved_frame(self):
+        return self.__last_solved_frame
+
+    def set_last_solved_frame(self, v):
+        self.__last_solved_frame = v
 
     def ui_state(self):
         return self.__ui_state

@@ -11,7 +11,8 @@ import board
 import adafruit_bno055
 import logging
 
-from scipy.spatial.transform import Rotation
+from pyquaternion import Quaternion
+import math
 
 from PiFinder import config
 
@@ -81,14 +82,46 @@ class Imu:
         )
 
     def quat_to_euler(self, quat):
+        """
+        Convert quaternion to Euler angles (xyz order, degrees).
+
+        Uses pyquaternion instead of scipy.Rotation for lighter dependency.
+        BNO055 returns quaternions as (w, x, y, z) but we receive (x, y, z, w).
+        """
         if quat[0] + quat[1] + quat[2] + quat[3] == 0:
             return 0, 0, 0
-        rot = Rotation.from_quat(quat)
-        rot_euler = rot.as_euler("xyz", degrees=True)
-        # convert from -180/180 to 0/360
-        rot_euler[0] += 180
-        rot_euler[1] += 180
-        rot_euler[2] += 180
+
+        # scipy uses [x, y, z, w], pyquaternion uses [w, x, y, z]
+        q = Quaternion(w=quat[3], x=quat[0], y=quat[1], z=quat[2])
+
+        # Get rotation matrix and extract xyz Euler angles
+        # This matches scipy's as_euler("xyz", degrees=True) behavior
+        rot_matrix = q.rotation_matrix
+
+        # Extract Euler angles from rotation matrix (xyz intrinsic order)
+        # Based on: https://www.gregslabaugh.net/publications/euler.pdf
+        if abs(rot_matrix[2, 0]) != 1:
+            pitch = -math.asin(rot_matrix[2, 0])
+            roll = math.atan2(rot_matrix[2, 1] / math.cos(pitch),
+                             rot_matrix[2, 2] / math.cos(pitch))
+            yaw = math.atan2(rot_matrix[1, 0] / math.cos(pitch),
+                            rot_matrix[0, 0] / math.cos(pitch))
+        else:
+            # Gimbal lock case
+            yaw = 0
+            if rot_matrix[2, 0] == -1:
+                pitch = math.pi / 2
+                roll = math.atan2(rot_matrix[0, 1], rot_matrix[0, 2])
+            else:
+                pitch = -math.pi / 2
+                roll = math.atan2(-rot_matrix[0, 1], -rot_matrix[0, 2])
+
+        # Convert to degrees and shift from -180/180 to 0/360
+        rot_euler = [
+            math.degrees(roll) + 180,
+            math.degrees(pitch) + 180,
+            math.degrees(yaw) + 180,
+        ]
         return rot_euler
 
     def moving(self):

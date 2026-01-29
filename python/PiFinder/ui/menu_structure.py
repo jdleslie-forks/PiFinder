@@ -995,6 +995,10 @@ pifinder_menu = {
                                     "post_callback": callbacks.update_gpsd_baud_rate,
                                     "items": [
                                         {
+                                            "name": _("4800 (Pi Zero 2W)"),
+                                            "value": 4800,
+                                        },
+                                        {
                                             "name": _("9600 (standard)"),
                                             "value": 9600,
                                         },

@@ -1,8 +1,16 @@
+"""
+Nearby objects finder using scipy.spatial.KDTree.
+
+Uses 3D Cartesian coordinates for spherical nearest-neighbor queries.
+This replaces both sklearn.BallTree and the Cython SpatialIndex with
+a lightweight, maintainable solution.
+"""
+
 from PiFinder.catalogs import CompositeObject
 from typing import List
 import time
 import numpy as np
-from sklearn.neighbors import BallTree
+from scipy.spatial import KDTree
 import logging
 
 logger = logging.getLogger("Catalog.Nearby")
@@ -10,8 +18,30 @@ MAX_DEVIATION = 1.0
 MAX_TIME = 2
 
 
+def ra_dec_to_cartesian(ra_deg: np.ndarray, dec_deg: np.ndarray) -> np.ndarray:
+    """
+    Convert RA/Dec (degrees) to 3D unit vectors on the celestial sphere.
+
+    This allows using Euclidean distance in 3D as a proxy for angular distance.
+    For small angles: chord_distance ≈ 2 * sin(angle/2)
+    """
+    ra_rad = np.deg2rad(ra_deg)
+    dec_rad = np.deg2rad(dec_deg)
+
+    x = np.cos(dec_rad) * np.cos(ra_rad)
+    y = np.cos(dec_rad) * np.sin(ra_rad)
+    z = np.sin(dec_rad)
+
+    return np.column_stack([x, y, z])
+
+
+def angular_to_chord_distance(angle_deg: float) -> float:
+    """Convert angular distance (degrees) to chord distance in 3D unit sphere."""
+    return 2 * np.sin(np.deg2rad(angle_deg) / 2)
+
+
 class Nearby:
-    """Nearby class to calcluate and display the closest objects"""
+    """Nearby class to calculate and display the closest objects"""
 
     def __init__(self, shared_state) -> None:
         self.shared_state = shared_state
@@ -62,69 +92,98 @@ class Nearby:
 
 
 class ClosestObjectsFinder:
+    """
+    Finds closest celestial objects using scipy.spatial.KDTree.
+
+    Uses 3D Cartesian coordinates on the unit sphere for efficient
+    nearest-neighbor queries with proper spherical geometry.
+    """
+
     def __init__(self):
-        self._objects_balltree = None
+        self._kdtree = None
         self._objects = None
 
     def calculate_objects_balltree(self, objects: list[CompositeObject]) -> None:
         """
-        Calculates a flat list of objects and the balltree for those objects
+        Build KDTree spatial index from catalog objects.
+
+        Converts RA/Dec to 3D unit vectors for spherical queries.
         """
         deduplicated_objects = deduplicate_objects(objects)
-        object_radecs = np.array(
-            [[np.deg2rad(x.ra), np.deg2rad(x.dec)] for x in deduplicated_objects]
-        )
+
+        if not deduplicated_objects:
+            self._kdtree = None
+            self._objects = None
+            return
+
         self._objects = np.array(deduplicated_objects)
-        self._objects_balltree = BallTree(
-            object_radecs, leaf_size=20, metric="haversine"
-        )
 
-    def get_closest_objects(self, ra, dec, n: int = 0) -> List[CompositeObject]:
-        """
-        Takes the current catalog or a list of catalogs, gets the filtered
-        objects and returns the n closest objects to ra/dec
-        """
+        # Convert RA/Dec to 3D Cartesian coordinates
+        ra = np.array([obj.ra for obj in deduplicated_objects], dtype=np.float64)
+        dec = np.array([obj.dec for obj in deduplicated_objects], dtype=np.float64)
+        xyz = ra_dec_to_cartesian(ra, dec)
 
-        if self._objects_balltree is None or self._objects is None:
+        # Build KDTree
+        self._kdtree = KDTree(xyz)
+
+    def get_closest_objects(self, ra: float, dec: float, n: int = 0) -> List[CompositeObject]:
+        """
+        Get the n closest objects to the given RA/Dec position.
+
+        Args:
+            ra: Right ascension in degrees
+            dec: Declination in degrees
+            n: Number of objects to return (0 = all)
+
+        Returns:
+            List of closest CompositeObjects, sorted by distance
+        """
+        if self._kdtree is None or self._objects is None:
             return []
 
-        nr_objects = len(self._objects)
+        n_objects = len(self._objects)
 
-        # If n is 0, we want to find all objects
         if n == 0:
-            n = nr_objects
+            n = n_objects
 
-        query = [[np.deg2rad(ra), np.deg2rad(dec)]]
-        # logger.debug("Query: %s, objects: %s", query, self._objects)
-        _, obj_ind = self._objects_balltree.query(query, k=min(n, nr_objects))
-        # logger.debug("Found %i objects, from %i objects, k=%i", len(obj_ind), nr_objects, min(n, nr_objects))
-        results = self._objects[obj_ind[0]]
-        # logger.debug("Found %i objects, from %i objects, n=%i", len(results), nr_objects, n)
-        return results
+        # Convert query point to 3D
+        query_xyz = ra_dec_to_cartesian(
+            np.array([ra], dtype=np.float64),
+            np.array([dec], dtype=np.float64)
+        )
+
+        # Query k nearest neighbors
+        k = min(n, n_objects)
+        distances, indices = self._kdtree.query(query_xyz, k=k)
+
+        # Handle single result case (query returns scalar, not array)
+        if k == 1:
+            indices = [indices[0]]
+        else:
+            indices = indices[0]
+
+        return self._objects[indices].tolist()
 
 
 def deduplicate_objects(
     unfiltered_objects: list[CompositeObject],
 ) -> list[CompositeObject]:
+    """
+    Remove duplicate objects, preferring Messier > NGC > others.
+    """
     deduplicated_dict = {}
 
     # Define precedence for catalog codes
-    # M (Messier) objects have highest precedence, followed by NGC objects
     precedence = {"M": 2, "NGC": 1}
 
     for obj in unfiltered_objects:
         if obj.object_id not in deduplicated_dict:
-            # If the object ID is not in the dictionary, add it
             deduplicated_dict[obj.object_id] = obj
         else:
-            # If the object ID already exists, get it
             existing_obj = deduplicated_dict[obj.object_id]
-            # Get precedence for existing object, default to 0 if not in precedence dict
             existing_precedence = precedence.get(existing_obj.catalog_code, 0)
-            # Get precedence for new object, default to 0 if not in precedence dict
             new_precedence = precedence.get(obj.catalog_code, 0)
-            # Replace existing object if new object has higher precedence
             if new_precedence > existing_precedence:
                 deduplicated_dict[obj.object_id] = obj
-    results = list(deduplicated_dict.values())
-    return results
+
+    return list(deduplicated_dict.values())
