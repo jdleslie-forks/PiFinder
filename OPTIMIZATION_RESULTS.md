@@ -43,7 +43,7 @@ def get_objects(
 
 **Problem:** NEAREST mode required loading all objects into KDTree.
 
-**Solution:** Cell-based spatial queries using existing `cell_id` index (5° sky cells).
+**Solution:** Cell-based spatial queries using existing `cell_id` index (10° sky cells).
 
 **File:** `python/PiFinder/db/catalog_query.py`
 
@@ -169,7 +169,7 @@ CREATE TABLE objects (
     const TEXT, obj_type TEXT,
     mag TEXT, size TEXT,
     surface_brightness REAL,
-    cell_id INTEGER  -- 5° sky cells for spatial queries
+    cell_id INTEGER  -- 10° sky cells for spatial queries
 );
 
 CREATE INDEX idx_objects_cell_id ON objects(cell_id);

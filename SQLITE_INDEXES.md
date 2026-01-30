@@ -9,7 +9,7 @@ All indexes are created automatically on first database access via `CatalogQuery
 
 | Index | Column(s) | Purpose |
 |-------|-----------|---------|
-| `idx_objects_cell_id` | `cell_id` | Spatial queries using 5° sky cells for NEAREST mode |
+| `idx_objects_cell_id` | `cell_id` | Spatial queries using 10° sky cells for NEAREST mode |
 | `idx_objects_ra_dec` | `ra, dec` | Coordinate-based filtering and range queries |
 
 ### Catalog Objects Table
@@ -59,9 +59,9 @@ On first database access, `CatalogQuery._ensure_analyzed()` runs SQLite's `ANALY
 
 ## Spatial Indexing: Cell ID System
 
-The `cell_id` column divides the sky into 5° cells for efficient spatial queries:
+The `cell_id` column divides the sky into 10° cells for efficient spatial queries:
 
-- Cell calculation: `cell_id = floor(ra/5) * 100 + floor((dec+90)/5)`
+- Cell calculation: `cell_id = floor(ra/10) * 18 + floor((dec+90)/10)`
 - NEAREST mode queries neighboring cells based on search radius
 - Handles RA wraparound (0°/360°) and polar regions
 
