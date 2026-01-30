@@ -130,10 +130,12 @@ fi
 # Enable zram compressed swap (critical for Pi Zero 2W with 512MB RAM)
 sudo systemctl enable zramswap
 
-# Enable service
+# Enable services
 sudo cp /home/pifinder/PiFinder/pi_config_files/pifinder.service /lib/systemd/system/pifinder.service
 sudo cp /home/pifinder/PiFinder/pi_config_files/pifinder_splash.service /lib/systemd/system/pifinder_splash.service
+sudo cp /home/pifinder/PiFinder/pi_config_files/cedar_detect.service /lib/systemd/system/cedar_detect.service
 sudo systemctl daemon-reload
+sudo systemctl enable cedar_detect
 sudo systemctl enable pifinder
 sudo systemctl enable pifinder_splash
 
