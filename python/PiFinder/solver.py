@@ -393,6 +393,7 @@ def solver(
                             solved["RA"] = None
                             solved["Dec"] = None
                             solved["Matches"] = 0
+                            solution = {}  # Prevent stale solution from previous solve being merged
                         else:
                             log_no_stars_found = True
                             _solver_args = {}
